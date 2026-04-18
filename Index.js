@@ -25,15 +25,16 @@ let playerData = [];
 let dropTracking = {};
 let playerHealth = {};
 let bagSwapCooldowns = {};
+let chunkKillCooldowns = {};
+
+// ===== CONFIG =====
+const BANNED_CHUNKS = ['domain'];
 
 // ===== MAIN POLL =====
 async function pollPlayers() {
   try {
     const res = await connection.send('player list-detailed');
     playerData = res?.data?.Result || [];
-    if (playerData.length > 0) {
-      console.log('[DEBUG] First player data:', JSON.stringify(playerData[0]));
-    }
   } catch (err) {
     console.error('[Poll] Error:', err.message);
   }
@@ -41,30 +42,23 @@ async function pollPlayers() {
 
 // ===== ANTI BAG SWAP =====
 async function runAntiBagSwap() {
-  // Build inventory for all players first
   const inventories = {};
   for (const player of playerData) {
     const username = player.username || player.Username;
     const invRes = await connection.send(`player inventory ${username}`);
     inventories[username] = invRes?.data?.Result?.[0];
   }
-  for (const player of playerData) {
-    const username = player.username || player.Username;
-    const inv = inventories[username];
-    console.log(`[DEBUG] ${username} RightHand: ${inv?.RightHand?.Name || 'empty'} | LeftHand: ${inv?.LeftHand?.Name || 'empty'} | Back: ${inv?.Back?.[0]?.Name || 'empty'}`);
-  }
+
   for (const swapper of playerData) {
     const swapperName = swapper.username || swapper.Username;
     const swapperInv = inventories[swapperName];
     if (!swapperInv) continue;
 
-    // Check if swapper is holding a bag in hand
     const holdingBagInHand =
       (swapperInv.RightHand?.Name || '').toLowerCase().includes('bag') ||
       (swapperInv.LeftHand?.Name || '').toLowerCase().includes('bag');
     if (!holdingBagInHand) continue;
 
-    // Get the hand position that's holding the bag
     const handPos = (swapperInv.RightHand?.Name || '').toLowerCase().includes('bag')
       ? swapper.rightHandPosition
       : swapper.leftHandPosition;
@@ -74,16 +68,13 @@ async function runAntiBagSwap() {
       const victimName = victim.username || victim.Username;
       if (victimName === swapperName) continue;
 
-      const victimInv = inventories[victimName];
-      if (!victimInv) continue;
-
-      const victimPos = victim.position || victim.Position;
-      if (!victimPos) continue;
+      const victimForward = victim.headForward || victim.HeadForward;
+      if (!victimForward) continue;
 
       const victimBackPos = [
-        victimPos[0] - 0.767,
-        victimPos[1] + 0.811,
-        victimPos[2] - 1.226
+        victimPos[0] - (victimForward[0] * 0.5),  // 0.5 units behind
+        victimPos[1] + 0.8,                         // 0.8 units up from floor
+        victimPos[2] - (victimForward[2] * 0.5)    // 0.5 units behind
       ];
 
       const dist = Math.sqrt(
@@ -94,7 +85,6 @@ async function runAntiBagSwap() {
 
       console.log(`[BagSwap] ${swapperName} hand dist to ${victimName} back: ${dist.toFixed(2)}`);
 
-      console.log(`[BagSwap] ${swapperName} hand dist to ${victimName} back: ${dist.toFixed(2)}`);
       if (dist < BAG_SWAP_DISTANCE) {
         const pairKey = [swapperName, victimName].sort().join(':');
         if (!bagSwapCooldowns[pairKey]) {
@@ -113,7 +103,32 @@ async function runAntiBagSwap() {
   }
 }
 
-// ===== HEALTH MONITOR / ANTI DUPE =====
+// ===== ANTI DUPE =====
+async function runAntiDupe() {
+  for (const player of playerData) {
+    const username = player.username || player.Username;
+    const chunk = (player.chunk || player.Chunk || '').toLowerCase();
+
+    const isInBannedChunk = BANNED_CHUNKS.some(banned => chunk.includes(banned));
+    if (!isInBannedChunk) continue;
+
+    if (chunkKillCooldowns[username]) continue;
+    chunkKillCooldowns[username] = true;
+
+    console.log(`[AntiDupe] ${username} entered banned chunk: ${chunk}`);
+    await connection.send(`player set-stat ${username} health 100`);
+    await connection.send(`player kill ${username}`);
+    await connection.send(`player message ${username} "You have entered a restricted area and have been flagged" 10`);
+
+    sendGriefAlert(username, `Entered restricted chunk: ${chunk}`, 1);
+
+    setTimeout(() => {
+      delete chunkKillCooldowns[username];
+    }, 5000);
+  }
+}
+
+// ===== HEALTH MONITOR =====
 async function runHealthMonitor() {
   for (const player of playerData) {
     const username = player.username || player.Username;
@@ -124,7 +139,6 @@ async function runHealthMonitor() {
     if (lastHealth === undefined) continue;
 
     const takingDamage = health < lastHealth;
-
     // Anti dupe check — coords and orb ID to be filled in later
     // if (takingDamage && isAtDupeLocation && holdingOrb) { kill and flag }
   }
@@ -147,6 +161,8 @@ async function main() {
 
     if (!username) return;
 
+    console.log(`[InvDebug] ${username} | changeType: "${changeType}" | item: "${itemName}"`);
+
     const isGriefItem = GRIEF_LIST.some(i =>
       i.name.toLowerCase() === itemName.toLowerCase()
     );
@@ -168,72 +184,37 @@ async function main() {
 
     if (changeType === 'drop') {
       if (!tracking.holdingFromBag) return;
-      tracking.holdingFromBag = false; // reset immediately so next undock works
-
-      const player = playerData.find(p => (p.username || p.Username) === username);
-      const pos = player?.position || player?.Position;
-      const capturedPos = pos ? [...pos] : null; // snapshot position
-
-      setTimeout(() => {
-        if (tracking.lastDropPos && capturedPos) {
-          const dist = Math.sqrt(
-            Math.pow(capturedPos[0] - tracking.lastDropPos[0], 2) +
-            Math.pow(capturedPos[1] - tracking.lastDropPos[1], 2) +
-            Math.pow(capturedPos[2] - tracking.lastDropPos[2], 2)
-          );
-          if (dist > 4) {
-            console.log(`[AntiGrief] ${username} dropped far away, resetting count`);
-            tracking.count = 0;
-          }
-        }
-
-        tracking.lastDropPos = capturedPos;
-        tracking.count++;
-        console.log(`[AntiGrief] ${username} dropped ${itemName} from bag (${tracking.count}/${GRIEF_DROP_THRESHOLD})`);
-
-        if (tracking.count >= GRIEF_DROP_THRESHOLD) {
-          console.log(`[AntiGrief] ${username} flagged!`);
-          dropTracking[username] = { count: 0, holdingFromBag: false, lastDropPos: null };
-          sendGriefAlert(username, itemName, GRIEF_DROP_THRESHOLD);
-        }
-      }, 1000);
-      return;
-    }
-
-    if (changeType === 'dock') {
-      // Dock followed the drop = put back in bag, cancel timer
-      clearTimeout(tracking.dropTimer);
-      tracking.holdingFromBag = false;
-      tracking.justUndocked = false;
-      console.log(`[Dock] ${username} put ${itemName} back in bag`);
-      return;
-    }
-
-    if (changeType === 'pickup') {
-      // Either part of undock sequence or ground pickup - either way ignore
-      return;
-    }
-
-    if (changeType === 'drop') {
-      if (!tracking.holdingFromBag) return;
-
       tracking.holdingFromBag = false;
       tracking.count++;
       console.log(`[AntiGrief] ${username} dropped ${itemName} from bag (${tracking.count}/${GRIEF_DROP_THRESHOLD})`);
 
       if (tracking.count >= GRIEF_DROP_THRESHOLD) {
-        console.log(`[AntiGrief] ${username} flagged!`);
-        dropTracking[username] = { count: 0, justUndocked: false, holdingFromBag: false };
-        sendGriefAlert(username, itemName, GRIEF_DROP_THRESHOLD);
+        const player = playerData.find(p => (p.username || p.Username) === username);
+        const pos = player?.position || player?.Position;
+        const chunk = player?.chunk || player?.Chunk || 'Unknown';
+        const playerId = player?.id || player?.Id || 'Unknown';
+
+        dropTracking[username] = { count: 0, holdingFromBag: false, justUndocked: false };
+        sendGriefAlert(username, itemName, GRIEF_DROP_THRESHOLD, { pos, chunk, playerId });
+        return;
       }
+      return;
+    }
+
+    if (changeType === 'dock') {
+      tracking.holdingFromBag = false;
+      tracking.justUndocked = false;
+      console.log(`[Dock] ${username} put ${itemName} back in bag`);
+      return;
     }
   });
 
-  // Keep polling for position/health data
+  // setInterval is OUTSIDE the subscribe
   setInterval(async () => {
     await pollPlayers();
     await runAntiBagSwap();
     await runHealthMonitor();
+    await runAntiDupe();
   }, POLL_INTERVAL);
 }
 
