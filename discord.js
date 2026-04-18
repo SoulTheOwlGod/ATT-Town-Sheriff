@@ -1,9 +1,20 @@
-const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder } = require('discord.js');
 const { DISCORD_TOKEN } = require('C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/config.js');
 const fs = require('fs');
 
 const HISTORY_FILE = 'C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/history.json';
 const LINKED_FILE = 'C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/linked.json';
+const ERROR_LOG_FILE = 'C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/errorlog.json';
+const DOWNTIME_FILE = 'C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/downtime.json';
+
+const BOT_START_TIME = Date.now();
+
+// ===== DEV ACCESS =====
+const DEV_IDS = ['1066510611959251025', '753449987425304677']; // burntp0tat0, _im1hatedsoul_
+
+function isDev(discordId) {
+  return DEV_IDS.includes(discordId);
+}
 
 const discordClient = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
@@ -11,10 +22,46 @@ const discordClient = new Client({
 
 let attConnection = null;
 let flagsChannelId = null;
-const pendingVerifications = {}; // { discordUserId: { attUsername, attId, code, expires } }
+const pendingVerifications = {};
 
 function setConnection(conn) { attConnection = conn; }
 
+// ===== ERROR LOG =====
+function loadErrorLog() {
+  if (!fs.existsSync(ERROR_LOG_FILE)) return [];
+  try { return JSON.parse(fs.readFileSync(ERROR_LOG_FILE, 'utf-8')); }
+  catch { return []; }
+}
+
+function saveErrorLog(data) {
+  fs.writeFileSync(ERROR_LOG_FILE, JSON.stringify(data, null, 2));
+}
+
+function logError(source, message) {
+  const log = loadErrorLog();
+  log.push({ source, message, timestamp: new Date().toISOString() });
+  // Keep only the last 50 errors
+  if (log.length > 50) log.splice(0, log.length - 50);
+  saveErrorLog(log);
+  console.error(`[ERROR][${source}] ${message}`);
+}
+
+// Intercept uncaught errors and log them
+process.on('uncaughtException', (err) => logError('uncaughtException', err.message));
+process.on('unhandledRejection', (err) => logError('unhandledRejection', err?.message || String(err)));
+
+// ===== DOWNTIME =====
+function loadDowntime() {
+  if (!fs.existsSync(DOWNTIME_FILE)) return null;
+  try { return JSON.parse(fs.readFileSync(DOWNTIME_FILE, 'utf-8')); }
+  catch { return null; }
+}
+
+function saveDowntime(data) {
+  fs.writeFileSync(DOWNTIME_FILE, JSON.stringify(data, null, 2));
+}
+
+// ===== HISTORY =====
 function loadHistory() {
   if (!fs.existsSync(HISTORY_FILE)) return {};
   try { return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8')); }
@@ -59,10 +106,8 @@ function generateCode() {
 
 function logEvent(username, type, detail) {
   const history = loadHistory();
-  console.log('[History] Before save:', JSON.stringify(history[username]));
   if (!history[username]) history[username] = [];
   history[username].push({ type, detail, timestamp: new Date().toISOString() });
-  console.log('[History] After push:', JSON.stringify(history[username]));
   saveHistory(history);
   console.log(`[History] Logged ${type} for ${username}`);
 }
@@ -101,6 +146,21 @@ function buildProfileEmbed(username) {
   return { content: `📋 **${username}'s history:**\n${lines}`, components };
 }
 
+function getUptime() {
+  const totalSeconds = Math.floor((Date.now() - BOT_START_TIME) / 1000);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return { hrs, mins, secs };
+}
+
+function getDowntimeDisplay() {
+  const downtime = loadDowntime();
+  if (!downtime) return '`No Scheduled Downtimes`';
+  return `\`${downtime.display} PST\``;
+}
+
+// ===== READY =====
 discordClient.once('clientReady', async () => {
   console.log('[Discord] Bot is online as ' + discordClient.user.tag);
   registerCommands();
@@ -108,8 +168,32 @@ discordClient.once('clientReady', async () => {
     const channel = guild.channels.cache.find(c => c.name === 'flags-and-warnings');
     if (channel) { flagsChannelId = channel.id; console.log('[Discord] Auto-found flags channel:', channel.id); break; }
   }
+  for (const guild of discordClient.guilds.cache.values()) {
+    await setBotRoleColor(guild);
+  }
 });
 
+discordClient.on('guildCreate', async (guild) => {
+  console.log(`[Discord] Joined new server: ${guild.name}`);
+  await setBotRoleColor(guild);
+});
+
+async function setBotRoleColor(guild) {
+  try {
+    const botMember = guild.members.cache.get(discordClient.user.id)
+      || await guild.members.fetch(discordClient.user.id);
+    const botRole = botMember.roles.cache.find(r => r.managed);
+    if (!botRole) { console.log(`[RoleColor] No managed role found in ${guild.name}`); return; }
+    if (botRole.color !== 0xC2B280) {
+      await botRole.setColor(0xC2B280);
+      console.log(`[RoleColor] Set role color in ${guild.name}`);
+    }
+  } catch (err) {
+    console.error(`[RoleColor] Failed in ${guild.name}:`, err.message);
+  }
+}
+
+// ===== REGISTER COMMANDS =====
 async function registerCommands() {
   const setupCmd = new SlashCommandBuilder()
     .setName('setup')
@@ -135,27 +219,67 @@ async function registerCommands() {
     .addStringOption(o => o.setName('playerid').setDescription('Your ATT player ID').setRequired(true))
     .addStringOption(o => o.setName('code').setDescription('Verification code sent in-game').setRequired(false));
 
-  await discordClient.application.commands.set([setupCmd, playerCmd, profileCmd, linkCmd]);
+  const discordInviteCmd = new SlashCommandBuilder()
+    .setName('discordinvite')
+    .setDescription('Get the link to join the Town Sheriff Discord server');
+
+  const helpCmd = new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('View all available commands and what they do');
+
+  const suggestCmd = new SlashCommandBuilder()
+    .setName('suggest')
+    .setDescription('Suggest an idea for the server')
+    .addStringOption(o => o.setName('idea').setDescription('Your idea').setRequired(false));
+
+  const pingCmd = new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Check the bot\'s ping and uptime stats');
+
+  // ===== DEV COMMANDS =====
+  const devRestartCmd = new SlashCommandBuilder()
+    .setName('devbotrestart')
+    .setDescription('[DEV ONLY] Restarts the Town Sheriff bot');
+
+  const devServerListCmd = new SlashCommandBuilder()
+    .setName('devserverlist')
+    .setDescription('[DEV ONLY] List all Discord servers using Town Sheriff');
+
+  const devLeaveServerCmd = new SlashCommandBuilder()
+    .setName('devleaveserver')
+    .setDescription('[DEV ONLY] Make the bot leave a server by ID')
+    .addStringOption(o => o.setName('serverid').setDescription('The Discord server ID to leave').setRequired(true));
+
+  const devScheduleDowntimeCmd = new SlashCommandBuilder()
+    .setName('devscheduledowntime')
+    .setDescription('[DEV ONLY] Schedule a downtime displayed on /ping')
+    .addStringOption(o => o.setName('date').setDescription('Date of downtime e.g. Jan 20').setRequired(true))
+    .addStringOption(o => o.setName('time').setDescription('Time of downtime e.g. 3:00 PM').setRequired(true));
+
+  const devErrorLogCmd = new SlashCommandBuilder()
+    .setName('deverrorlog')
+    .setDescription('[DEV ONLY] View recent bot error logs');
+
+  await discordClient.application.commands.set([
+    setupCmd, playerCmd, profileCmd, linkCmd,
+    discordInviteCmd, helpCmd, suggestCmd, pingCmd,
+    devRestartCmd, devServerListCmd, devLeaveServerCmd,
+    devScheduleDowntimeCmd, devErrorLogCmd
+  ]);
   console.log('[Discord] Commands registered!');
 }
 
 discordClient.login(DISCORD_TOKEN);
 
+// ===== GRIEF ALERT =====
 async function sendGriefAlert(username, itemName, dropCount, extraInfo = {}) {
   const { pos, chunk, playerId } = extraInfo;
 
-  logEvent(username, 'flag', `Flagged for dropping ${itemName} ${dropCount} times`, {
-    chunk,
-    pos,
-    playerId,
-    timestamp: new Date().toISOString()
-  });
-  
+  logEvent(username, 'flag', `Flagged for dropping ${itemName} ${dropCount} times`);
+
   if (!flagsChannelId) { console.log('[Discord] No flags channel!'); return; }
 
   const channel = await discordClient.channels.fetch(flagsChannelId);
-
-  // Find Town Moderator role in the guild
   const modRole = channel.guild.roles.cache.find(r => r.name === 'Town Moderator');
   const ping = modRole ? `<@&${modRole.id}>` : '';
 
@@ -182,9 +306,20 @@ async function sendGriefAlert(username, itemName, dropCount, extraInfo = {}) {
   });
 }
 
+// ===== INTERACTIONS =====
 discordClient.on('interactionCreate', async interaction => {
   if (interaction.isChatInputCommand()) {
 
+    // Dev command guard
+    const devCommands = ['devbotrestart', 'devserverlist', 'devleaveserver', 'devscheduledowntime', 'deverrorlog'];
+    if (devCommands.includes(interaction.commandName)) {
+      if (!isDev(interaction.user.id)) {
+        await interaction.reply({ content: `🚫 You don't have permission to use dev commands.`, ephemeral: true });
+        return;
+      }
+    }
+
+    // ===== SETUP =====
     if (interaction.commandName === 'setup') {
       await interaction.deferReply({ ephemeral: true });
       const existing = interaction.guild.channels.cache.find(c => c.name === 'flags-and-warnings');
@@ -195,6 +330,7 @@ discordClient.on('interactionCreate', async interaction => {
       return;
     }
 
+    // ===== PLAYER =====
     if (interaction.commandName === 'player') {
       await interaction.deferReply({ ephemeral: true });
       const username = interaction.options.getString('username');
@@ -210,6 +346,7 @@ discordClient.on('interactionCreate', async interaction => {
       return;
     }
 
+    // ===== PROFILE =====
     if (interaction.commandName === 'profile') {
       await interaction.deferReply({ ephemeral: true });
       const username = interaction.options.getString('username');
@@ -218,6 +355,7 @@ discordClient.on('interactionCreate', async interaction => {
       return;
     }
 
+    // ===== LINK =====
     if (interaction.commandName === 'link') {
       await interaction.deferReply({ ephemeral: true });
       const attUsername = interaction.options.getString('username');
@@ -225,56 +363,214 @@ discordClient.on('interactionCreate', async interaction => {
       const code = interaction.options.getString('code');
       const discordId = interaction.user.id;
 
-      // Step 2 - verifying with code
       if (code) {
         const pending = pendingVerifications[discordId];
-
-        if (!pending) {
-          await interaction.editReply(`❌ No pending verification found. Run \`/link\` without a code first.`);
-          return;
-        }
-
-        if (Date.now() > pending.expires) {
-          delete pendingVerifications[discordId];
-          await interaction.editReply(`❌ Your verification code expired. Please run \`/link\` again.`);
-          return;
-        }
-
-        if (pending.attUsername !== attUsername || pending.attId !== attId) {
-          await interaction.editReply(`❌ Username or ID doesn't match your pending verification.`);
-          return;
-        }
-
-        if (code.toUpperCase() !== pending.code) {
-          await interaction.editReply(`❌ Incorrect code. Please try again.`);
-          return;
-        }
+        if (!pending) { await interaction.editReply(`❌ No pending verification found. Run \`/link\` without a code first.`); return; }
+        if (Date.now() > pending.expires) { delete pendingVerifications[discordId]; await interaction.editReply(`❌ Your verification code expired. Please run \`/link\` again.`); return; }
+        if (pending.attUsername !== attUsername || pending.attId !== attId) { await interaction.editReply(`❌ Username or ID doesn't match your pending verification.`); return; }
+        if (code.toUpperCase() !== pending.code) { await interaction.editReply(`❌ Incorrect code. Please try again.`); return; }
 
         const linked = loadLinked();
         linked[discordId] = { attUsername, attId, linkedAt: new Date().toISOString() };
         saveLinked(linked);
         delete pendingVerifications[discordId];
-
         await interaction.editReply(`✅ Successfully linked! Your Discord is now linked to ATT account **${attUsername}**.`);
         return;
       }
 
-      // Step 1 - send code in game
-      if (!attConnection) {
-        await interaction.editReply(`❌ Bot is not connected to the ATT server right now.`);
+      if (!attConnection) { await interaction.editReply(`❌ Bot is not connected to the ATT server right now.`); return; }
+
+      const verifyCode = generateCode();
+      pendingVerifications[discordId] = { attUsername, attId, code: verifyCode, expires: Date.now() + 5 * 60 * 1000 };
+      await attConnection.send(`player message ${attUsername} "Your Town Sheriff verification code is: ${verifyCode}" 10`);
+      await interaction.editReply(`📨 A verification code has been sent to **${attUsername}** in-game.\nRun \`/link ${attUsername} ${attId} <code>\` to complete linking.\n\nCode expires in 5 minutes.`);
+      return;
+    }
+
+    // ===== DISCORD INVITE =====
+    if (interaction.commandName === 'discordinvite') {
+      await interaction.reply({
+        content: `## 🤠 Join the Town Sheriff Discord!\n> Click the link below to join our community server:\n> **https://discord.gg/cMRRUPYfvG**`,
+        ephemeral: false
+      });
+      return;
+    }
+
+    // ===== HELP =====
+    if (interaction.commandName === 'help') {
+      const embed = new EmbedBuilder()
+        .setTitle('🤠 Town Sheriff — Command List')
+        .setColor(0xF5A623)
+        .setDescription('Here are all available commands for the Town Sheriff bot:')
+        .addFields(
+          { name: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📢  Public Commands', value: '\u200b' },
+          { name: '`/discordinvite`',              value: 'Get the invite link to join the Town Sheriff Discord server.' },
+          { name: '`/suggest <idea>`',              value: 'Want to suggest a feature or idea? This will point you to the right place.' },
+          { name: '`/ping`',                        value: 'Check the bot\'s current ping and how long it\'s been online.' },
+          { name: '`/link <username> <playerid>`',  value: 'Link your Discord account to your ATT in-game account. A verification code will be sent to you in-game.' },
+          { name: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔒  Moderator Commands', value: '\u200b' },
+          { name: '`/setup`',                       value: 'Creates (or finds) the **#flags-and-warnings** channel used for grief alerts. *(Admin only)*' },
+          { name: '`/player <username>`',            value: 'View a plain-text log of a player\'s infraction history. *(Admin only)*' },
+          { name: '`/profile <username>`',           value: 'View a player\'s full profile with buttons to remove individual entries. *(Admin only)*' }
+        )
+        .setFooter({ text: 'Town Sheriff Bot' })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
+    // ===== SUGGEST =====
+    if (interaction.commandName === 'suggest') {
+      await interaction.reply({
+        content: `## 💡 Got an idea?\nTo suggest an idea, join the Discord and post in our suggestions channel:\n> **https://discord.gg/cMRRUPYfvG**`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // ===== PING =====
+    if (interaction.commandName === 'ping') {
+      const sent = await interaction.deferReply({ fetchReply: true });
+      const ping = sent.createdTimestamp - interaction.createdTimestamp;
+      const wsPing = discordClient.ws.ping;
+      const { hrs, mins, secs } = getUptime();
+
+      const embed = new EmbedBuilder()
+        .setTitle('🤠 Town Sheriff Bot Stats')
+        .setColor(0x57F287)
+        .addFields(
+          { name: '🏓  Ping',                    value: `\`${ping}ms\``,                       inline: true },
+          { name: '🔌  WebSocket',                value: `\`${wsPing}ms\``,                     inline: true },
+          { name: '\u200b',                       value: '\u200b',                               inline: true },
+          { name: '⏱️  Online For',               value: `\`${hrs}hrs ${mins}min ${secs}sec\``, inline: true },
+          { name: '🗓️  Next Scheduled Downtime',  value: getDowntimeDisplay(),                  inline: true }
+        )
+        .setFooter({ text: 'Town Sheriff Bot' })
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed] });
+      return;
+    }
+
+    // ===== DEV: BOT RESTART =====
+    if (interaction.commandName === 'devbotrestart') {
+      await interaction.reply({ content: `🔄 Restarting the bot now...`, ephemeral: true });
+      console.log(`[DEV] Bot restart triggered by ${interaction.user.tag}`);
+      setTimeout(() => process.exit(0), 1500);
+      return;
+    }
+
+    // ===== DEV: SERVER LIST =====
+    if (interaction.commandName === 'devserverlist') {
+      await interaction.deferReply({ ephemeral: true });
+      const guilds = discordClient.guilds.cache;
+
+      if (guilds.size === 0) { await interaction.editReply(`📋 The bot is not in any servers.`); return; }
+
+      const guildList = [...guilds.values()].slice(0, 25);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🤠 Town Sheriff — Server List')
+        .setColor(0xF5A623)
+        .setDescription(`Bot is active in **${guilds.size}** server(s).\n\nPress a button to generate a one-time invite link.`)
+        .addFields({ name: 'Servers', value: guildList.map((g, i) => `${i + 1}. **${g.name}** — ${g.memberCount} members`).join('\n') })
+        .setFooter({ text: 'Town Sheriff Bot • Dev Only' })
+        .setTimestamp();
+
+      const components = [];
+      for (let i = 0; i < guildList.length; i += 5) {
+        const row = new ActionRowBuilder();
+        guildList.slice(i, i + 5).forEach(g => {
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`serverlink_${g.id}`)
+              .setLabel(g.name.slice(0, 20))
+              .setStyle(ButtonStyle.Primary)
+          );
+        });
+        components.push(row);
+      }
+
+      await interaction.editReply({ embeds: [embed], components });
+      return;
+    }
+
+    // ===== DEV: LEAVE SERVER =====
+    if (interaction.commandName === 'devleaveserver') {
+      await interaction.deferReply({ ephemeral: true });
+      const serverId = interaction.options.getString('serverid');
+      const guild = discordClient.guilds.cache.get(serverId);
+
+      if (!guild) {
+        await interaction.editReply(`❌ Bot is not in a server with ID \`${serverId}\`.`);
         return;
       }
 
-      const verifyCode = generateCode();
-      pendingVerifications[discordId] = {
-        attUsername,
-        attId,
-        code: verifyCode,
-        expires: Date.now() + 5 * 60 * 1000
-      };
+      const guildName = guild.name;
+      try {
+        await guild.leave();
+        console.log(`[DEV] Left server: ${guildName} (${serverId}) — triggered by ${interaction.user.tag}`);
+        await interaction.editReply(`✅ Successfully left **${guildName}**.`);
+      } catch (err) {
+        await interaction.editReply(`❌ Failed to leave **${guildName}**: ${err.message}`);
+      }
+      return;
+    }
 
-      await attConnection.send(`player message ${attUsername} "Your Eldervale Discord verification code is: ${verifyCode}" 10`);
-      await interaction.editReply(`📨 A verification code has been sent to **${attUsername}** in-game.\nRun \`/link ${attUsername} ${attId} <code>\` to complete linking.\n\nCode expires in 5 minutes.`);
+    // ===== DEV: SCHEDULE DOWNTIME =====
+    if (interaction.commandName === 'devscheduledowntime') {
+      const date = interaction.options.getString('date');
+      const time = interaction.options.getString('time');
+      const display = `${date} at ${time}`;
+
+      saveDowntime({ display, setBy: interaction.user.tag, setAt: new Date().toISOString() });
+
+      await interaction.reply({
+        content: `✅ Downtime scheduled!\n> **${display} PST**\n\nThis will now appear on \`/ping\`. To clear it, use \`/devscheduledowntime\` and type \`none\` for the date.`,
+        ephemeral: true
+      });
+
+      if (date.toLowerCase() === 'none') {
+        saveDowntime(null);
+        await interaction.editReply(`✅ Scheduled downtime cleared. \`/ping\` will now show "No Scheduled Downtimes".`);
+      }
+      return;
+    }
+
+    // ===== DEV: ERROR LOG =====
+    if (interaction.commandName === 'deverrorlog') {
+      await interaction.deferReply({ ephemeral: true });
+      const log = loadErrorLog();
+
+      if (log.length === 0) {
+        await interaction.editReply({ content: `✅ No errors logged.`, components: [] });
+        return;
+      }
+
+      // Show most recent 20 errors
+      const recent = log.slice(-20).reverse();
+      const lines = recent.map((e, i) => {
+        const date = new Date(e.timestamp).toLocaleDateString();
+        const time = new Date(e.timestamp).toLocaleTimeString();
+        return `${i + 1}. **[${e.source}]** ${e.message}\n   *(${date} ${time})*`;
+      }).join('\n\n');
+
+      const embed = new EmbedBuilder()
+        .setTitle('🚨 Town Sheriff — Error Log')
+        .setColor(0xED4245)
+        .setDescription(lines.slice(0, 4000)) // this is the Discord embed description limit
+        .setFooter({ text: `${log.length} total errors on record • Town Sheriff Bot • Dev Only` })
+        .setTimestamp();
+
+      const clearRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('clearerrorlog')
+          .setLabel('🗑️ Clear All Logs')
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      await interaction.editReply({ embeds: [embed], components: [clearRow] });
       return;
     }
   }
@@ -283,6 +579,62 @@ discordClient.on('interactionCreate', async interaction => {
 
   const parts = interaction.customId.split('_');
   const action = parts[0];
+
+  // ===== CLEAR ERROR LOG BUTTON =====
+  if (interaction.customId === 'clearerrorlog') {
+    if (!isDev(interaction.user.id)) {
+      await interaction.reply({ content: `🚫 You don't have permission to do this.`, ephemeral: true });
+      return;
+    }
+    saveErrorLog([]);
+    await interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('🚨 Town Sheriff — Error Log')
+          .setColor(0x57F287)
+          .setDescription('✅ All error logs have been cleared.')
+          .setFooter({ text: 'Town Sheriff Bot • Dev Only' })
+          .setTimestamp()
+      ],
+      components: []
+    });
+    return;
+  }
+
+  // ===== SERVER LINK BUTTON =====
+  if (action === 'serverlink') {
+    if (!isDev(interaction.user.id)) {
+      await interaction.reply({ content: `🚫 You don't have permission to use this.`, ephemeral: true });
+      return;
+    }
+
+    const guildId = parts[1];
+    try {
+      const guild = discordClient.guilds.cache.get(guildId);
+      if (!guild) { await interaction.reply({ content: `❌ Could not find that server.`, ephemeral: true }); return; }
+
+      const targetChannel = guild.channels.cache.find(
+        c => c.isTextBased() && c.permissionsFor(guild.members.me).has(PermissionFlagsBits.CreateInstantInvite)
+      );
+
+      if (!targetChannel) {
+        await interaction.reply({ content: `❌ **${guild.name}** — Bot doesn't have permission to create invites here.`, ephemeral: true });
+        return;
+      }
+
+      const invite = await targetChannel.createInvite({ maxAge: 300, maxUses: 1, reason: 'Dev server list lookup' });
+      await interaction.reply({
+        content: `🔗 **${guild.name}**\n> ${invite.url}\n\n*Expires in 5 minutes, single use.*`,
+        ephemeral: true
+      });
+    } catch (err) {
+      console.error('[DevServerList] Failed to create invite:', err.message);
+      await interaction.reply({ content: `❌ Failed to generate invite: ${err.message}`, ephemeral: true });
+    }
+    return;
+  }
+
+  // ===== STANDARD BUTTON HANDLERS =====
   const username = parts.slice(1, action === 'remove' ? -1 : undefined).join('_');
 
   if (action === 'warn') {
