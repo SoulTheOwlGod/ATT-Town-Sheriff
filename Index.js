@@ -139,8 +139,6 @@ async function runHealthMonitor() {
     if (lastHealth === undefined) continue;
 
     const takingDamage = health < lastHealth;
-    // Anti dupe check — coords and orb ID to be filled in later
-    // if (takingDamage && isAtDupeLocation && holdingOrb) { kill and flag }
   }
 }
 
@@ -209,7 +207,6 @@ async function main() {
     }
   });
 
-  // setInterval is OUTSIDE the subscribe
   setInterval(async () => {
     await pollPlayers();
     await runAntiBagSwap();
