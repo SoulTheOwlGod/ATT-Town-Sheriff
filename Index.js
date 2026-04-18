@@ -8,6 +8,7 @@ const client = new Client(myUserConfig);
 const POLL_INTERVAL = 500;
 const BAG_SWAP_DISTANCE = 3;
 const GRIEF_DROP_THRESHOLD = 10;
+const RETRY_INTERVAL = 30000; // How long to wait between reconnect attempts (ms)
 
 // ===== GRIEF ITEM LIST =====
 const GRIEF_LIST = [
@@ -26,6 +27,7 @@ let dropTracking = {};
 let playerHealth = {};
 let bagSwapCooldowns = {};
 let chunkKillCooldowns = {};
+let pollInterval = null;
 
 // ===== CONFIG =====
 const BANNED_CHUNKS = ['domain'];
@@ -71,10 +73,13 @@ async function runAntiBagSwap() {
       const victimForward = victim.headForward || victim.HeadForward;
       if (!victimForward) continue;
 
+      const victimPos = victim.position || victim.Position;
+      if (!victimPos) continue;
+
       const victimBackPos = [
-        victimPos[0] - (victimForward[0] * 0.5),  // 0.5 units behind
-        victimPos[1] + 0.8,                         // 0.8 units up from floor
-        victimPos[2] - (victimForward[2] * 0.5)    // 0.5 units behind
+        victimPos[0] - (victimForward[0] * 0.5),
+        victimPos[1] + 0.8,
+        victimPos[2] - (victimForward[2] * 0.5)
       ];
 
       const dist = Math.sqrt(
@@ -142,16 +147,43 @@ async function runHealthMonitor() {
   }
 }
 
-// ===== STARTUP =====
-async function main() {
-  await client.start();
-  console.log('[Bot] Logged in as ' + myUserConfig.username + '!');
+// ===== RESET STATE ON DISCONNECT =====
+function resetState() {
+  playerData = [];
+  dropTracking = {};
+  playerHealth = {};
+  bagSwapCooldowns = {};
+  chunkKillCooldowns = {};
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+  connection = null;
+  setConnection(null);
+}
 
-  connection = await client.openServerConnection(1704646669);
-  console.log('[Bot] Connected to server!');
+// ===== CONNECT TO SERVER (with retry) =====
+async function connectToServer() {
+  while (true) {
+    try {
+      console.log('[Bot] Attempting to connect to ATT server...');
+      connection = await client.openServerConnection(1704646669);
+      console.log('[Bot] Connected to server!');
+      setConnection(connection);
+      startListeners();
+      return; // Connected — exit the retry loop
+    } catch (err) {
+      console.error(`[Bot] Failed to connect: ${err.message}`);
+      console.log(`[Bot] Server may be offline. Retrying in ${RETRY_INTERVAL / 1000} seconds...`);
+      resetState();
+      await new Promise(resolve => setTimeout(resolve, RETRY_INTERVAL));
+    }
+  }
+}
 
-  setConnection(connection);
-
+// ===== SETUP LISTENERS & POLL =====
+function startListeners() {
+  // Inventory event listener
   connection.subscribe('InventoryChanged', async (event) => {
     const username = event.data?.User?.username || event.data?.User?.Username;
     const changeType = (event.data?.ChangeType || '').toLowerCase();
@@ -207,12 +239,34 @@ async function main() {
     }
   });
 
-  setInterval(async () => {
-    await pollPlayers();
-    await runAntiBagSwap();
-    await runHealthMonitor();
-    await runAntiDupe();
+  // Listen for server disconnect and reconnect automatically
+  connection.on('disconnect', async () => {
+    console.warn('[Bot] Disconnected from ATT server!');
+    resetState();
+    console.log(`[Bot] Attempting to reconnect in ${RETRY_INTERVAL / 1000} seconds...`);
+    await new Promise(resolve => setTimeout(resolve, RETRY_INTERVAL));
+    await connectToServer();
+  });
+
+  // Start polling
+  pollInterval = setInterval(async () => {
+    if (!connection) return;
+    try {
+      await pollPlayers();
+      await runAntiBagSwap();
+      await runHealthMonitor();
+      await runAntiDupe();
+    } catch (err) {
+      console.error('[PollLoop] Unexpected error:', err.message);
+    }
   }, POLL_INTERVAL);
+}
+
+// ===== STARTUP =====
+async function main() {
+  await client.start();
+  console.log('[Bot] Logged in as ' + myUserConfig.username + '!');
+  await connectToServer();
 }
 
 main().catch(console.error);
