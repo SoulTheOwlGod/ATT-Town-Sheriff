@@ -99,6 +99,66 @@ function saveLinked(data) {
   fs.writeFileSync(LINKED_FILE, JSON.stringify(data, null, 2));
 }
 
+const SETTINGS_FILE = 'C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff Discord/serversettings.json';
+
+
+function getDefaultSettings() {
+  return {
+    antiGrief: false,
+    antiDupe: false,
+    antiBagSwap: false,
+    discordAlerts: false,
+    discordBot: true
+  };
+}
+
+function loadSettings(guildId) {
+  if (!fs.existsSync(SETTINGS_FILE)) return getDefaultSettings();
+  try {
+    const all = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+    return all[guildId] || getDefaultSettings();
+  } catch { return getDefaultSettings(); }
+}
+
+function saveSettings(guildId, data) {
+  let all = {};
+  if (fs.existsSync(SETTINGS_FILE)) {
+    try { all = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8')); } catch { }
+  }
+  all[guildId] = data;
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(all, null, 2));
+}
+
+function buildSettingsRows(settings) {
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('setting_antiGrief')
+      .setLabel(`Anti Grief — ${settings.antiGrief ? 'ON' : 'OFF'}`)
+      .setStyle(settings.antiGrief ? ButtonStyle.Success : ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('setting_antiDupe')
+      .setLabel(`Anti Dupe — ${settings.antiDupe ? 'ON' : 'OFF'}`)
+      .setStyle(settings.antiDupe ? ButtonStyle.Success : ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('setting_antiBagSwap')
+      .setLabel(`Anti Bag Swap — ${settings.antiBagSwap ? 'ON' : 'OFF'}`)
+      .setStyle(settings.antiBagSwap ? ButtonStyle.Success : ButtonStyle.Danger),
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('setting_discordAlerts')
+      .setLabel(`Discord Alerts — ${settings.discordAlerts ? 'ON' : 'OFF'}`)
+      .setStyle(settings.discordAlerts ? ButtonStyle.Success : ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId('setting_discordBot')
+      .setLabel(`Discord Bot — ${settings.discordBot ? 'ON' : 'OFF'}`)
+      .setStyle(settings.discordBot ? ButtonStyle.Success : ButtonStyle.Danger),
+  );
+
+  return [row1, row2];
+}
+
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from({ length: 5 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
@@ -171,6 +231,15 @@ discordClient.once('clientReady', async () => {
   for (const guild of discordClient.guilds.cache.values()) {
     await setBotRoleColor(guild);
   }
+  const flagFile = 'C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/restarting.flag';
+  if (fs.existsSync(flagFile)) {
+    const channelId = fs.readFileSync(flagFile, 'utf-8').trim();
+    fs.unlinkSync(flagFile);
+    try {
+      const channel = await discordClient.channels.fetch(channelId);
+      await channel.send(`✅ **Town Sheriff bot successfully restarted!**`);
+    } catch { }
+  }
 });
 
 discordClient.on('guildCreate', async (guild) => {
@@ -200,17 +269,15 @@ async function registerCommands() {
     .setDescription('Sets up Town Sheriff channels')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
-  const playerCmd = new SlashCommandBuilder()
-    .setName('player')
-    .setDescription('Look up a player history')
-    .addStringOption(o => o.setName('username').setDescription('ATT username').setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
-
   const profileCmd = new SlashCommandBuilder()
     .setName('profile')
     .setDescription('View a player profile with mod actions')
     .addStringOption(o => o.setName('username').setDescription('ATT username').setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+
+  const serverSettingsCmd = new SlashCommandBuilder()
+    .setName('serversettings')
+    .setDescription('Use this command to configure the bot settings for your server.');
 
   const linkCmd = new SlashCommandBuilder()
     .setName('link')
@@ -256,12 +323,16 @@ async function registerCommands() {
     .addStringOption(o => o.setName('date').setDescription('Date of downtime e.g. Jan 20').setRequired(true))
     .addStringOption(o => o.setName('time').setDescription('Time of downtime e.g. 3:00 PM').setRequired(true));
 
+  const devRemoveDowntimeCmd = new SlashCommandBuilder()
+    .setName('devscheduledowntimeremove')
+    .setDescription('[DEV ONLY] Remove the scheduled downtime from /ping');
+
   const devErrorLogCmd = new SlashCommandBuilder()
     .setName('deverrorlog')
     .setDescription('[DEV ONLY] View recent bot error logs');
 
   await discordClient.application.commands.set([
-    setupCmd, playerCmd, profileCmd, linkCmd,
+    setupCmd, profileCmd, linkCmd, serverSettingsCmd,
     discordInviteCmd, helpCmd, suggestCmd, pingCmd,
     devRestartCmd, devServerListCmd, devLeaveServerCmd,
     devScheduleDowntimeCmd, devErrorLogCmd
@@ -308,10 +379,32 @@ async function sendGriefAlert(username, itemName, dropCount, extraInfo = {}) {
 
 // ===== INTERACTIONS =====
 discordClient.on('interactionCreate', async interaction => {
+  // ===== DISABLED BOT CHECK =====
+  if (interaction.guildId) {
+    const settings = loadSettings(interaction.guildId);
+    if (!settings.discordBot && interaction.isChatInputCommand() && interaction.commandName !== 'serversettings') {
+      await interaction.reply({
+        content: `This server has disabled commands. Run \`/serversettings\` and enable "Discord Bot" to reactivate commands.`,
+        ephemeral: true
+      });
+      return;
+    }
+  }
+
+  if (interaction.commandName === 'serversettings') {
+    const settings = loadSettings(interaction.guildId);
+    await interaction.reply({
+      content: '⚙️ **Server Settings**\nUse this command to configure the bot settings for your server.',
+      components: buildSettingsRows(settings),
+      ephemeral: true
+    });
+    return;
+  }
+
   if (interaction.isChatInputCommand()) {
 
     // Dev command guard
-    const devCommands = ['devbotrestart', 'devserverlist', 'devleaveserver', 'devscheduledowntime', 'deverrorlog'];
+    const devCommands = ['devbotrestart', 'devserverlist', 'devleaveserver', 'devscheduledowntime', 'devscheduledowntimeremove', 'deverrorlog'];
     if (devCommands.includes(interaction.commandName)) {
       if (!isDev(interaction.user.id)) {
         await interaction.reply({ content: `🚫 You don't have permission to use dev commands.`, ephemeral: true });
@@ -327,22 +420,6 @@ discordClient.on('interactionCreate', async interaction => {
       const channel = await interaction.guild.channels.create({ name: 'flags-and-warnings', reason: 'Town Sheriff setup' });
       flagsChannelId = channel.id;
       await interaction.editReply(`✅ Setup complete! ${channel}`);
-      return;
-    }
-
-    // ===== PLAYER =====
-    if (interaction.commandName === 'player') {
-      await interaction.deferReply({ ephemeral: true });
-      const username = interaction.options.getString('username');
-      const history = loadHistory();
-      const record = history[username];
-      if (!record || record.length === 0) { await interaction.editReply(`✅ **${username}** has a clean record!`); return; }
-      const lines = record.map((e, i) => {
-        const date = new Date(e.timestamp).toLocaleDateString();
-        const time = new Date(e.timestamp).toLocaleTimeString();
-        return `${i + 1}. **${e.type.toUpperCase()}** — ${e.detail} (${date} ${time})`;
-      }).join('\n');
-      await interaction.editReply(`📋 **${username}'s history:**\n${lines}`);
       return;
     }
 
@@ -404,14 +481,21 @@ discordClient.on('interactionCreate', async interaction => {
         .setDescription('Here are all available commands for the Town Sheriff bot:')
         .addFields(
           { name: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📢  Public Commands', value: '\u200b' },
-          { name: '`/discordinvite`',              value: 'Get the invite link to join the Town Sheriff Discord server.' },
-          { name: '`/suggest <idea>`',              value: 'Want to suggest a feature or idea? This will point you to the right place.' },
-          { name: '`/ping`',                        value: 'Check the bot\'s current ping and how long it\'s been online.' },
-          { name: '`/link <username> <playerid>`',  value: 'Link your Discord account to your ATT in-game account. A verification code will be sent to you in-game.' },
-          { name: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔒  Moderator Commands', value: '\u200b' },
-          { name: '`/setup`',                       value: 'Creates (or finds) the **#flags-and-warnings** channel used for grief alerts. *(Admin only)*' },
-          { name: '`/player <username>`',            value: 'View a plain-text log of a player\'s infraction history. *(Admin only)*' },
-          { name: '`/profile <username>`',           value: 'View a player\'s full profile with buttons to remove individual entries. *(Admin only)*' }
+          { name: '`/discordinvite`', value: 'Get the invite link to join the Town Sheriff Discord server.' },
+          { name: '`/suggest <idea>`', value: 'Want to suggest a feature or idea? This will point you to the right place.' },
+          { name: '`/ping`', value: 'Check the bot\'s current ping and how long it\'s been online.' },
+          { name: '`/link <username> <playerid>`', value: 'Link your Discord account to your ATT in-game account. A verification code will be sent to you in-game.' },
+          { name: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔒  Moderator / Owner Commands', value: '\u200b' },
+          { name: '`/setup`', value: 'Creates (or finds) the **#flags-and-warnings** channel used for grief alerts. *(Admin only)*' },
+          { name: '`/profile <username>`', value: 'View a player\'s full profile with buttons to remove individual entries. *(Admin only)*' },
+          { name: '`/serversettings`', value: 'Use this command to configure the bot settings for your server.' },
+          { name: '━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚙️  Dev Commands', value: '\u200b' },
+          { name: '`/devbotrestart`', value: 'Restart the bot process.' },
+          { name: '`/devserverlist`', value: 'List all Discord servers using Town Sheriff.' },
+          { name: '`/devleaveserver <id>`', value: 'Make the bot leave a server by ID.' },
+          { name: '`/devscheduledowntime`', value: 'Schedule a downtime shown on `/ping`.' },
+          { name: '`/devscheduledowntimeremove`', value: 'Clear the scheduled downtime from `/ping`.' },
+          { name: '`/deverrorlog`', value: 'View recent bot error logs.' }
         )
         .setFooter({ text: 'Town Sheriff Bot' })
         .setTimestamp();
@@ -440,11 +524,11 @@ discordClient.on('interactionCreate', async interaction => {
         .setTitle('🤠 Town Sheriff Bot Stats')
         .setColor(0x57F287)
         .addFields(
-          { name: '🏓  Ping',                    value: `\`${ping}ms\``,                       inline: true },
-          { name: '🔌  WebSocket',                value: `\`${wsPing}ms\``,                     inline: true },
-          { name: '\u200b',                       value: '\u200b',                               inline: true },
-          { name: '⏱️  Online For',               value: `\`${hrs}hrs ${mins}min ${secs}sec\``, inline: true },
-          { name: '🗓️  Next Scheduled Downtime',  value: getDowntimeDisplay(),                  inline: true }
+          { name: '🏓  Ping', value: `\`${ping}ms\``, inline: true },
+          { name: '🔌  WebSocket', value: `\`${wsPing}ms\``, inline: true },
+          { name: '\u200b', value: '\u200b', inline: true },
+          { name: '⏱️  Online For', value: `\`${hrs}hrs ${mins}min ${secs}sec\``, inline: true },
+          { name: '🗓️  Next Scheduled Downtime', value: getDowntimeDisplay(), inline: true }
         )
         .setFooter({ text: 'Town Sheriff Bot' })
         .setTimestamp();
@@ -453,11 +537,14 @@ discordClient.on('interactionCreate', async interaction => {
       return;
     }
 
-    // ===== DEV: BOT RESTART =====
     if (interaction.commandName === 'devbotrestart') {
       await interaction.reply({ content: `🔄 Restarting the bot now...`, ephemeral: true });
       console.log(`[DEV] Bot restart triggered by ${interaction.user.tag}`);
-      setTimeout(() => process.exit(0), 1500);
+
+      setTimeout(async () => {
+        fs.writeFileSync('C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff ATT/restarting.flag', interaction.channelId);
+        process.exit(0);
+      }, 1500);
       return;
     }
 
@@ -535,6 +622,13 @@ discordClient.on('interactionCreate', async interaction => {
         saveDowntime(null);
         await interaction.editReply(`✅ Scheduled downtime cleared. \`/ping\` will now show "No Scheduled Downtimes".`);
       }
+      return;
+    }
+
+    // ===== DEV: REMOVE DOWNTIME =====
+    if (interaction.commandName === 'devscheduledowntimeremove') {
+      saveDowntime(null);
+      await interaction.reply({ content: `✅ Scheduled downtime cleared. \`/ping\` will now show "No Scheduled Downtimes".`, ephemeral: true });
       return;
     }
 
@@ -691,6 +785,19 @@ discordClient.on('interactionCreate', async interaction => {
     const profileData = buildProfileEmbed(targetUsername);
     await interaction.update(profileData);
   }
+
+  if (action === 'setting') {
+    const settingKey = parts[1];
+    const settings = loadSettings(interaction.guildId);
+    settings[settingKey] = !settings[settingKey];
+    saveSettings(interaction.guildId, settings);
+
+    await interaction.update({
+      content: '⚙️ **Server Settings**\nUse this command to configure the bot settings for your server.',
+      components: buildSettingsRows(settings)
+    });
+  }
+
 });
 
-module.exports = { sendGriefAlert, setConnection };
+module.exports = { sendGriefAlert, setConnection, loadSettings };
