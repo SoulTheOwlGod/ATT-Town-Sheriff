@@ -1,6 +1,6 @@
 const { Client } = require("att-client");
-const { myUserConfig } = require("./config.js");
-const { sendGriefAlert, setConnection } = require('C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff Discord/discord.js');
+const { myUserConfig, DISCORD_GUILD_ID } = require('./config.js');
+const { sendGriefAlert, setConnection, loadSettings } = require('C:/Users/yehud/OneDrive/Desktop/Town Sheriff/Town Sheriff Discord/discord.js');
 
 const client = new Client(myUserConfig);
 
@@ -185,6 +185,8 @@ async function connectToServer() {
 function startListeners() {
   // Inventory event listener
   connection.subscribe('InventoryChanged', async (event) => {
+    const settings = loadSettings(DISCORD_GUILD_ID);
+    if (!settings.antiGrief) return;
     const username = event.data?.User?.username || event.data?.User?.Username;
     const changeType = (event.data?.ChangeType || '').toLowerCase();
     const itemName = event.data?.ItemName || '';
@@ -250,23 +252,24 @@ function startListeners() {
 
   // Start polling
   pollInterval = setInterval(async () => {
+    const settings = loadSettings(DISCORD_GUILD_ID);
     if (!connection) return;
     try {
       await pollPlayers();
-      await runAntiBagSwap();
+      if (settings.antiBagSwap) await runAntiBagSwap();
+      if (settings.antiDupe) await runAntiDupe();
       await runHealthMonitor();
-      await runAntiDupe();
     } catch (err) {
       console.error('[PollLoop] Unexpected error:', err.message);
     }
   }, POLL_INTERVAL);
-}
 
-// ===== STARTUP =====
-async function main() {
-  await client.start();
-  console.log('[Bot] Logged in as ' + myUserConfig.username + '!');
-  await connectToServer();
-}
+  // ===== STARTUP =====
+  async function main() {
+    await client.start();
+    console.log('[Bot] Logged in as ' + myUserConfig.username + '!');
+    await connectToServer();
+  }
 
-main().catch(console.error);
+  main().catch(console.error);
+}
